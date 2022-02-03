@@ -1,0 +1,4 @@
+.idea/
+*.gz*
+__pycache__
+models/
