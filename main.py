@@ -8,7 +8,7 @@ from pydrake.all import (
     LeafSystem, MultibodyPlant, PiecewisePose, Quaternion, RigidTransform,
     RotationMatrix, SceneGraph, Simulator, TrajectorySource, MeshcatVisualizerParams, ConstantVectorSource,
     ConnectMeshcatVisualizer, InverseDynamicsController, Parser, ProcessModelDirectives, LoadModelDirectives,
-    ZeroOrderHold,
+    ZeroOrderHold, PidController, MeshcatContactVisualizer, ConnectContactResultsToDrakeVisualizer
 )
 from pydrake.math import RollPitchYaw
 from pydrake.examples.manipulation_station import ManipulationStation
@@ -58,7 +58,9 @@ class BubbleGripperManipulator:
         AddPackagePaths(parser)  # Russ's manipulation repo.
         add_package_paths_local(parser)  # local.
         directive_file = os.path.join(
-            os.curdir, 'models', 'iiwa.yml')
+            os.getcwd(), 'models', 'iiwa_and_bubble.yml')
+
+
         ProcessModelDirectives(LoadModelDirectives(directive_file), self.plant, parser)
         self.plant.Finalize()
 
@@ -79,11 +81,53 @@ class BubbleGripperManipulator:
         builder.Connect(idc.get_output_port_control(),
                         self.plant.get_actuation_input_port(model_iiwa))
 
-        q0 = ConstantVectorSource([0, 0, 0, 0, 0, 0, 0, 0., 0., 0., -1.57, 0., 1.57, 0.])
+        q0 = ConstantVectorSource([0., 0., 0., -1.57, 0., 1.57, 0., 0, 0, 0, 0, 0, 0, 0])
         builder.AddSystem(q0)
         viz = ConnectMeshcatVisualizer(
             builder, scene_graph, zmq_url='tcp://127.0.0.1:6000', prefix="environment")
+
+        # Contact visualization?
+        # contact_viz = MeshcatContactVisualizer(
+        #     meshcat_viz=viz,
+        #     force_threshold=0,
+        #     contact_force_scale=1,
+        #     plant=self.plant,
+        #     contact_force_radius=0.005,
+        # )
+        # contact_input_port = contact_viz.GetInputPort('contact_results')
+        # ConnectContactResultsToDrakeVisualizer(
+        #     builder,
+        #     self.plant,
+        #     scene_graph,
+        # )
+        # builder.Connect(
+        #     self.plant.GetOutputPort('contact_results'),
+        #     contact_input_port,
+        # )
+
         builder.Connect(q0.GetOutputPort('y0'), idc.get_input_port_desired_state())
+
+        # Add the bubble gripper
+        model_bubble = self.plant.GetModelInstanceByName('bubble')
+        Kp_bubble = np.array([500, 500]) / 10.
+        Ki_bubble = np.zeros(2)
+        Kd_bubble = np.array([10, 10])
+        pid = PidController(Kp_bubble, Ki_bubble, Kd_bubble)
+        pid.set_name('gripper_finger_controller')
+        builder.AddSystem(pid)
+        builder.Connect(
+            pid.get_output_port_control(),
+            self.plant.get_actuation_input_port(model_bubble))
+        builder.Connect(
+            self.plant.get_state_output_port(model_bubble),
+            pid.get_input_port_estimated_state())
+
+        bubble_desired_state = ConstantVectorSource([-0.05, 0.05, 0, 0])
+        builder.AddSystem(bubble_desired_state)
+        builder.Connect(
+            bubble_desired_state.GetOutputPort('y0'),
+            pid.get_input_port_desired_state())
+
         self.diagram = builder.Build()
         render_system_with_graphviz(self.diagram)
 
@@ -112,7 +156,6 @@ class BubbleGripperManipulator:
         # self.station.SetWsgVelocity(station_context, 0)
 
         self.diagram.Publish(context)
-
         self.viz = self.diagram.GetSubsystemByName('meshcat_visualizer')
 
     def start(self):
@@ -120,7 +163,7 @@ class BubbleGripperManipulator:
         self.viz.start_recording()
         context = self.diagram.CreateDefaultContext()
         # station_context = self.diagram.GetMutableSubsystemContext(self.station, context)
-        q_0 = np.array([0., 0., 0, -1.57, 0, 1.57, 0])
+        # q_0 = np.array([0., 0., 0, -1.57, 0, 1.57, 0])
 
         # self.station.SetIiwaPosition(station_context, q_0)
         # self.station.SetIiwaVelocity(station_context, np.zeros(7))
@@ -130,7 +173,7 @@ class BubbleGripperManipulator:
         simulator = Simulator(self.diagram, context)
         simulator.set_target_realtime_rate(1.0)
 
-        duration = 0
+        duration = 5
         simulator.AdvanceTo(duration)
         self.viz.stop_recording()
         self.viz.publish_recording()
