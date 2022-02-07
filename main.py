@@ -8,7 +8,8 @@ from pydrake.all import (
     LeafSystem, MultibodyPlant, PiecewisePose, Quaternion, RigidTransform,
     RotationMatrix, SceneGraph, Simulator, TrajectorySource, MeshcatVisualizerParams, ConstantVectorSource,
     ConnectMeshcatVisualizer, InverseDynamicsController, Parser, ProcessModelDirectives, LoadModelDirectives,
-    ZeroOrderHold, PidController, MeshcatContactVisualizer, ConnectContactResultsToDrakeVisualizer
+    ZeroOrderHold, PidController, MeshcatContactVisualizer, ConnectContactResultsToDrakeVisualizer,
+    Joint,
 )
 from pydrake.math import RollPitchYaw
 from pydrake.examples.manipulation_station import ManipulationStation
@@ -109,7 +110,7 @@ class BubbleGripperManipulator:
 
         # Add the bubble gripper
         model_bubble = self.plant.GetModelInstanceByName('bubble')
-        Kp_bubble = np.array([500, 500]) / 10.
+        Kp_bubble = np.array([500, 500])
         Ki_bubble = np.zeros(2)
         Kd_bubble = np.array([10, 10])
         pid = PidController(Kp_bubble, Ki_bubble, Kd_bubble)
