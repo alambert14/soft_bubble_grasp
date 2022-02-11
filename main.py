@@ -17,8 +17,9 @@ from pydrake.examples.manipulation_station import ManipulationStation
 import meshcat
 
 from create_plant import create_iiwa_soft_bubble_plant
+from sample_grasps import GraspSampler
 from manipulation.utils import AddPackagePaths
-
+from manipulation.scenarios import AddRgbdSensors
 
 def add_package_paths_local(parser: Parser):
     models_dir = os.path.join(os.curdir, 'models')
@@ -45,7 +46,7 @@ def render_system_with_graphviz(system, output_file="system_view.gz"):
     src.render(output_file, view=False)
 
 
-class BubbleGripperManipulator:
+class BubbleGripperSystem:
 
     def __init__(self):
         builder = DiagramBuilder()
@@ -59,11 +60,17 @@ class BubbleGripperManipulator:
         AddPackagePaths(parser)  # Russ's manipulation repo.
         add_package_paths_local(parser)  # local.
         directive_file = os.path.join(
-            os.getcwd(), 'models', 'iiwa_and_bubble.yml')
-
+            os.getcwd(), 'models', 'iiwa_bubble_and_two_bins.yml')
 
         ProcessModelDirectives(LoadModelDirectives(directive_file), self.plant, parser)
+
+        # Add cucumber
+        cucumber_sdf = os.path.join(os.curdir, 'models', 'cucumber_simplified.sdf')
+        cucumber_model = parser.AddModelFromFile(cucumber_sdf, 'cucumber')
         self.plant.Finalize()
+
+        # Add cameras 0, 1, 2
+        AddRgbdSensors(builder, self.plant, scene_graph)
 
         plant_iiwa_controller, _ = create_iiwa_soft_bubble_plant(
             self.plant.gravity_field().gravity_vector()
@@ -110,9 +117,9 @@ class BubbleGripperManipulator:
 
         # Add the bubble gripper
         model_bubble = self.plant.GetModelInstanceByName('bubble')
-        Kp_bubble = np.array([500, 500])
+        Kp_bubble = np.array([5, 5])
         Ki_bubble = np.zeros(2)
-        Kd_bubble = np.array([10, 10])
+        Kd_bubble = np.array([0.5, 0.5])
         pid = PidController(Kp_bubble, Ki_bubble, Kd_bubble)
         pid.set_name('gripper_finger_controller')
         builder.AddSystem(pid)
@@ -129,6 +136,8 @@ class BubbleGripperManipulator:
             bubble_desired_state.GetOutputPort('y0'),
             pid.get_input_port_desired_state())
 
+
+
         self.diagram = builder.Build()
         render_system_with_graphviz(self.diagram)
 
@@ -144,25 +153,38 @@ class BubbleGripperManipulator:
         # self.gripper_frame = self.plant.GetFrameByName('body')  # base frame of iiwa?
         # self.world_frame = self.plant.world_frame()
 
-        context = self.diagram.CreateDefaultContext()
+        self.context = self.diagram.CreateDefaultContext()
         # passing in the object here?
-        plant_context = self.diagram.GetMutableSubsystemContext(self.plant, context)
+        self.plant_context = self.diagram.GetMutableSubsystemContext(self.plant, self.context)
+
+        # Move the cucumber
+        bin_inst = self.plant.GetModelInstanceByName('bin0')
+        bin_body = self.plant.GetBodyByName('bin_base', bin_inst)
+        X_B = self.plant.EvalBodyPoseInWorld(self.plant_context, bin_body)
+        X_BDrop = RigidTransform(np.array([0., 0., 0.4]))
+        X_Drop = X_B.multiply(X_BDrop)
+        cucumber_obj = self.plant.GetBodyByName('base_link', cucumber_model)
+
+        self.plant.SetFreeBodyPose(self.plant_context, cucumber_obj, X_Drop)
+
+
+
         # station_context = self.diagram.GetMutableSubsystemContext(self.station, context)
 
-        q_0 = np.array([0., 0., 0, -1.57, 0, 1.57, 0])
+        # q_0 = np.array([0., 0., 0, -1.57, 0, 1.57, 0])
 
         # self.station.SetIiwaPosition(station_context, q_0)
         # self.station.SetIiwaVelocity(station_context, np.zeros(7))
         # self.station.SetWsgPosition(station_context, 0.1)
         # self.station.SetWsgVelocity(station_context, 0)
 
-        self.diagram.Publish(context)
+        self.diagram.Publish(self.context)
         self.viz = self.diagram.GetSubsystemByName('meshcat_visualizer')
 
     def start(self):
         self.viz.reset_recording()
         self.viz.start_recording()
-        context = self.diagram.CreateDefaultContext()
+
         # station_context = self.diagram.GetMutableSubsystemContext(self.station, context)
         # q_0 = np.array([0., 0., 0, -1.57, 0, 1.57, 0])
 
@@ -171,20 +193,22 @@ class BubbleGripperManipulator:
         # self.station.SetWsgPosition(station_context, 0.1)
         # self.station.SetWsgVelocity(station_context, 0)
 
-        simulator = Simulator(self.diagram, context)
+        simulator = Simulator(self.diagram, self.context)
         simulator.set_target_realtime_rate(1.0)
 
-        duration = 5
+        duration = 1
         simulator.AdvanceTo(duration)
         self.viz.stop_recording()
         self.viz.publish_recording()
-
+        print('creating grasp sampler')
+        grasp_sampler = GraspSampler(self.diagram)
+        print(grasp_sampler.find_best_grasps(self.context))
 
 if __name__ == '__main__':
     # meshcat_ = StartMeshcat()
     v = meshcat.Visualizer(zmq_url='tcp://127.0.0.1:6000')
     v.delete()
 
-    robot = BubbleGripperManipulator()
+    robot = BubbleGripperSystem()
 
     robot.start()
