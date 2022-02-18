@@ -12,6 +12,8 @@ from pydrake.all import (
     Joint,
 )
 from pydrake.math import RollPitchYaw
+from pydrake.multibody import inverse_kinematics
+import pydrake.solvers.mathematicalprogram as mp
 from pydrake.examples.manipulation_station import ManipulationStation
 # from manipulation.meshcat_cpp_utils import StartMeshcat, AddMeshcatTriad
 import meshcat
@@ -72,13 +74,13 @@ class BubbleGripperSystem:
         # Add cameras 0, 1, 2
         AddRgbdSensors(builder, self.plant, scene_graph)
 
-        plant_iiwa_controller, _ = create_iiwa_soft_bubble_plant(
+        self.plant_iiwa_controller, _ = create_iiwa_soft_bubble_plant(
             self.plant.gravity_field().gravity_vector()
         )
         Kp_iiwa = np.array([800, 600, 600, 400, 400, 400, 200])
         Kd_iiwa = 2 * np.sqrt(Kp_iiwa)
         Ki_iiwa = np.zeros(7)
-        idc = InverseDynamicsController(plant_iiwa_controller, Kp_iiwa,
+        idc = InverseDynamicsController(self.plant_iiwa_controller, Kp_iiwa,
                                         Ki_iiwa, Kd_iiwa, False)
         builder.AddSystem(idc)
         model_iiwa = self.plant.GetModelInstanceByName('iiwa')
@@ -181,6 +183,8 @@ class BubbleGripperSystem:
         self.diagram.Publish(self.context)
         self.viz = self.diagram.GetSubsystemByName('meshcat_visualizer')
 
+        self.ik = inverse_kinematics.InverseKinematics(self.plant)
+
     def start(self):
         self.viz.reset_recording()
         self.viz.start_recording()
@@ -202,7 +206,44 @@ class BubbleGripperSystem:
         self.viz.publish_recording()
         print('creating grasp sampler')
         grasp_sampler = GraspSampler(self.diagram)
-        print(grasp_sampler.find_best_grasps(self.context))
+
+        while True:
+            print('Sampling grasps....')
+            X_Gs = grasp_sampler.find_best_grasps(self.context)
+            print(X_Gs)
+            self.pick_cycle(X_Gs[0])
+
+    def pick_cycle(self, X_G):
+        X_WE_above = RigidTransform(X_G)
+        X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.3]))
+        ik = inverse_kinematics.InverseKinematics(self.plant_iiwa_controller)
+        q_variables = ik.q()
+        frame_E = self.plant_iiwa_controller.GetBodyByName('bubble').body_frame()
+        print(frame_E.CalcPoseInBodyFrame(self.context))
+        ik.AddPositionConstraint(
+            frameB=frame_E, p_BQ=np.zeros(3),  # X_E is already frame E
+            frameA=self.plant_iiwa_controller.world_frame(),
+            p_AQ_lower=X_WE_above.translation() - 0.002,
+            p_AQ_upper=X_WE_above.translation() + 0.002,
+        )
+        ik.AddOrientationConstraint(
+            frameAbar=self.plant_iiwa_controller.world_frame(),
+            R_AbarA=X_WE_above.rotation(),
+            frameBbar=frame_E,
+            R_BbarB=RotationMatrix(),
+            theta_bound=0.01,
+        )
+
+        # Currently an issue with the solver, might have something to do with
+        # the gripper being at (0,0,0)?
+        prog = ik.prog()
+        init_q_guess = np.array([-1.57, 0., 0., -1.57, 0., 1.57, 0.])
+        prog.SetInitialGuess(q_variables, init_q_guess)
+        result = mp.Solve(prog)
+        assert result.is_success()
+        q_above = result.GetSolution(q_variables)
+        print(q_above)
+
 
 if __name__ == '__main__':
     # meshcat_ = StartMeshcat()

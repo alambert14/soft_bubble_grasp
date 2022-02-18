@@ -5,13 +5,14 @@ import meshcat
 import open3d as o3d
 from manipulation.meshcat_utils import draw_open3d_point_cloud, draw_points
 from manipulation.open3d_utils import create_open3d_point_cloud
-from manipulation.utils import AddPackagePaths
+from manipulation.utils import AddPackagePaths, FindResource
 
 import pydrake.common
 from pydrake.all import (
     AddMultibodyPlantSceneGraph,
     ConnectMeshcatVisualizer,
     Diagram, DiagramBuilder,
+    FindResourceOrThrow,
     Parser, LoadModelDirectives, ProcessModelDirectives,
     RigidTransform, RotationMatrix,
 )
@@ -30,6 +31,31 @@ def add_package_paths_local(parser: Parser):
     parser.package_map().Add('iiwa_controller',
                              iiwa_controller_models_dir)
     parser.package_map().PopulateFromFolder(models_dir)
+
+
+def draw_grasp_candidate(X_G, prefix='virtual_bubble', draw_frames=True):
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
+    parser = Parser(plant)
+    add_package_paths_local(parser)
+    # parser.package_map().Add("bubble_description", os.path.dirname(
+    #     FindResourceOrThrow(
+    #         "drake/manipulation/models/wsg_50_description/package.xml")))
+    gripper = parser.AddModelFromFile(
+        "models/bubble_gripper/schunk_wsg_50_bubble_collision.sdf", "bubble")
+    plant.WeldFrames(plant.world_frame(), plant.GetFrameByName("body"), X_G)
+    plant.Finalize()
+
+    frames_to_draw = {"virtual_bubble": {"body"}} if draw_frames else {}
+    meshcat = ConnectMeshcatVisualizer(builder, scene_graph, zmq_url='tcp://127.0.0.1:6000',
+                                       prefix=prefix,
+                                       delete_prefix_on_load=False,
+                                       frames_to_draw=frames_to_draw)
+    diagram = builder.Build()
+    context = diagram.CreateDefaultContext()
+
+    meshcat.load()
+    diagram.Publish(context)
 
 
 class GraspSampler:
@@ -59,7 +85,7 @@ class GraspSampler:
         context = diagram.CreateDefaultContext()
         diagram.Publish(context)
         # hide the gripper
-        self.viz.vis["planning/plant/gripper"].set_property('visible', False)
+        self.viz.vis['planning/plant/gripper'].set_property('visible', False)
 
     def generate_grasp_candidate_antipodal(self, plant_context,
                                            pcl, scene_graph_context):
@@ -86,32 +112,37 @@ class GraspSampler:
 
         # Insert meshcat visualization if needed
 
-        gripper_y = normal
+        # I t h i n k this is right
+        gripper_y = -normal
         # check if the normal is pointed down (positive x)
-        normal_tol = 0.1
-        if np.abs(np.dot(np.array([1, 0, 0]), gripper_y)) < normal_tol:
-            return None  # reject
+        # normal_tol = 0.1
+        # if np.abs(np.dot(np.array([0, 0, 1.]), gripper_y)) < normal_tol:
+        #     print('normal pointed down failure')
+        #     return np.inf, None  # reject
 
-        gripper_x = np.array([1, 0, 0]) - np.dot(np.array([1, 0, 0]), gripper_y) * gripper_y
-        gripper_z = np.cross(gripper_x, gripper_y)
+        gripper_z = np.array([0, 0, 1]) - np.dot(np.array([0, 0, 1]), gripper_y) * gripper_y
+        gripper_x = np.cross(gripper_y, gripper_z)
         R_WG = RotationMatrix(np.vstack((gripper_x, gripper_y, gripper_z)).T)
         # How to generate this from the sdf file
         # Also will vary in x if we try to adjust the distance along the gripper
-        p_GP = np.array([0.1, 0.05, 0])  # rough guess
+        p_GP = np.array([0.0, 0.0, -0.15])  # rough guess
 
         # Try different x positions
         min_dx = 0
-        max_dx = 1.2
-        step = 0.2
+        max_dx = 0.12
+        step = 0.02
         body = self.plant.GetBodyByName('body')
         costs = []
         X_Gs = []
         for dx in range(int((max_dx - min_dx) / step)):
             # Next another for loop for rotation adjustments as necessary
             adjust = min_dx + dx * step  # make sure this is right
-            p_GP2 = p_GP + np.array([adjust, 0., 0.])
+            p_GP2 = p_GP + np.array([0, 0., adjust])
 
-            X_G = RigidTransform(R_WG, p_GP2)
+            p_WG = -R_WG.multiply(p_GP2)
+            p_WG = p_P + p_WG
+            X_G = RigidTransform(R_WG, p_WG)
+            print(X_G)
             # Imagine the gripper is placed there
             self.plant.SetFreeBodyPose(plant_context, body, X_G)
             cost = self.grasp_candidate_cost(plant_context, pcl, scene_graph_context)
@@ -121,29 +152,13 @@ class GraspSampler:
                 X_Gs.append(X_G)
 
         if not costs:
+            print('no costs added')
             return np.inf, None
 
         best_cost_index = np.asarray(costs).argsort()[0]
         best_X_G = X_Gs[best_cost_index]
 
         return best_cost_index, best_X_G
-
-    def score_grasp_candidate(self, plant_context, pcl,
-                              scene_graph_context):
-        gripper_body = self.plant.GetBodyByName('bubble')  # why is this "body" in the example?
-        X_G = self.plant.GetFreeBodyPose(plant_context, gripper_body)
-
-        # Transform point cloud to gripper frame
-        p_GC = X_G.inverse().multiply(np.asarray(pcl.points).T)
-
-        query_object = self.scene_graph.get_query_output_port().Eval(scene_graph_context)
-        # Check collisions between the robot(?) and the sink (or just the gripper?)
-        if query_object.HasCollisions():
-            # Infinite cost
-            return np.inf
-
-        for pt in pcl.points:
-            pass
 
     def process_point_cloud(self, env_diagram, env_context, cameras, bin_name):
         env_plant = env_diagram.GetSubsystemByName("plant")
@@ -197,8 +212,9 @@ class GraspSampler:
         X_G = self.plant.GetFreeBodyPose(plant_context, body)
 
         query_object = self.scene_graph.get_query_output_port().Eval(scene_graph_context)
-        if query_object.HasCollisions():
-            return np.inf  # infinite cost for impossible grasp
+        # if query_object.HasCollisions():
+        #     print('has collisions')
+        #     return np.inf  # infinite cost for impossible grasp
 
         # Transform point cloud to gripper frame
         p_GC = X_G.inverse().multiply(np.asarray(pcl.points).T)
@@ -212,11 +228,11 @@ class GraspSampler:
                          axis=0)
 
         # Check gripper/pointcloud collisions
-        for pt in pcl.points:
-            signed_distances = query_object.ComputerSignedDistanceToPoint(pt,
-                                                                          0.0)
-            if signed_distances:
-                return np.inf
+        # for pt in pcl.points:
+        #     signed_distances = query_object.ComputeSignedDistanceToPoint(pt, 0.0)
+        #     if signed_distances:
+        #         print('collisions failure')
+        #         return np.inf
 
         # Score based on contact amount and also not too horizontal
         n_GC = X_G.rotation().multiply(np.asarray(pcl.normals)[indices, :].T)
@@ -227,6 +243,7 @@ class GraspSampler:
         # Reward sum |dot product of normals with gripper x|^2
         cost -= np.sum(n_GC[0, :] ** 2)
 
+        print(cost)
         return cost
 
     def find_best_grasps(self, env_context):
@@ -237,8 +254,10 @@ class GraspSampler:
         if pcl.is_empty():
             return []
 
-        # create new context for ourdiagram
-        context = self.diagram.CreateDefaultContext
+        draw_open3d_point_cloud(self.viz.vis['cloud'], pcl, size=0.003)
+
+        # create new context for our diagram
+        context = self.diagram.CreateDefaultContext()
         plant_context = self.plant.GetMyContextFromRoot(context)
         scene_graph_context = self.scene_graph.GetMyContextFromRoot(context)
 
@@ -250,6 +269,7 @@ class GraspSampler:
                 plant_context, pcl,
                 scene_graph_context
             )
+            # print(cost, X_G)
             if np.isfinite(cost):
                 all_costs.append(cost),
                 X_Gs.append(X_G)
@@ -260,5 +280,6 @@ class GraspSampler:
         best_X_Gs = []
         for idx in best_cost_indices:
             best_X_Gs.append(X_Gs[idx])
+            # draw_grasp_candidate(X_Gs[idx], prefix=f'{idx}th best')
 
         return best_X_Gs
