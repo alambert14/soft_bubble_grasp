@@ -20,6 +20,7 @@ import meshcat
 
 from create_plant import create_iiwa_soft_bubble_plant
 from sample_grasps import GraspSampler
+from inverse_kinematics import calc_joint_trajectory
 from manipulation.utils import AddPackagePaths
 from manipulation.scenarios import AddRgbdSensors
 
@@ -138,8 +139,6 @@ class BubbleGripperSystem:
             bubble_desired_state.GetOutputPort('y0'),
             pid.get_input_port_desired_state())
 
-
-
         self.diagram = builder.Build()
         render_system_with_graphviz(self.diagram)
 
@@ -168,8 +167,6 @@ class BubbleGripperSystem:
         cucumber_obj = self.plant.GetBodyByName('base_link', cucumber_model)
 
         self.plant.SetFreeBodyPose(self.plant_context, cucumber_obj, X_Drop)
-
-
 
         # station_context = self.diagram.GetMutableSubsystemContext(self.station, context)
 
@@ -214,8 +211,26 @@ class BubbleGripperSystem:
             self.pick_cycle(X_Gs[0])
 
     def pick_cycle(self, X_G):
+        frame_E = self.plant_iiwa_controller.GetBodyByName('bubble').body_frame()
+        context_iiwa_plant = self.plant_iiwa_controller.CreateDefaultContext()
+        print(f'frame E: {frame_E.CalcPoseInBodyFrame(context_iiwa_plant)}')
+        X_WE_start = self.plant_iiwa_controller.CalcRelativeTransform(
+            context_iiwa_plant, self.plant_iiwa_controller.world_frame(), frame_E)
         X_WE_above = RigidTransform(X_G)
-        X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.3]))
+        X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.]))
+        try:
+            q_traj_0_to_above, q_traj_above_to_0 = calc_joint_trajectory(
+                X_WE_start=X_WE_start, X_WE_final=X_WE_above, duration=5.0,
+                frame_E=frame_E, plant=self.plant_iiwa_controller,
+                q_initial_guess=np.array([-1.57, 0., 0., -1.57, 0., 1.57, 0.]),
+            )
+        except AssertionError:
+            print('Grasping failed, trying something else')
+            raise RuntimeError
+
+
+        '''
+        print(X_WE_above)
         ik = inverse_kinematics.InverseKinematics(self.plant_iiwa_controller)
         q_variables = ik.q()
         frame_E = self.plant_iiwa_controller.GetBodyByName('bubble').body_frame()
@@ -242,7 +257,8 @@ class BubbleGripperSystem:
         result = mp.Solve(prog)
         assert result.is_success()
         q_above = result.GetSolution(q_variables)
-        print(q_above)
+        '''
+        # print(q_above)
 
 
 if __name__ == '__main__':
