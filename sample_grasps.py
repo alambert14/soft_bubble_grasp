@@ -33,6 +33,16 @@ def add_package_paths_local(parser: Parser):
     parser.package_map().PopulateFromFolder(models_dir)
 
 
+def render_system_with_graphviz(system, output_file="system_view_vision.gz"):
+    """ Renders the Drake system (presumably a diagram,
+    otherwise this graph will be fairly trivial) using
+    graphviz to a specified file. """
+    from graphviz import Source
+    string = system.GetGraphvizString()
+    src = Source(string)
+    src.render(output_file, view=False)
+
+
 def draw_grasp_candidate(X_G, prefix='virtual_bubble', draw_frames=True):
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
@@ -42,7 +52,7 @@ def draw_grasp_candidate(X_G, prefix='virtual_bubble', draw_frames=True):
     #     FindResourceOrThrow(
     #         "drake/manipulation/models/wsg_50_description/package.xml")))
     gripper = parser.AddModelFromFile(
-        "models/bubble_gripper/schunk_wsg_50_bubble_collision.sdf", "bubble")
+        "models/bubble_gripper/schunk_wsg_50_bubble_collision.sdf", "viz_bubble")
     plant.WeldFrames(plant.world_frame(), plant.GetFrameByName("body"), X_G)
     plant.Finalize()
 
@@ -85,7 +95,7 @@ class GraspSampler:
         context = diagram.CreateDefaultContext()
         diagram.Publish(context)
         # hide the gripper
-        self.viz.vis['planning/plant/gripper'].set_property('visible', False)
+        self.viz.vis['planning/plant/bubble'].set_property('visible', False)
 
     def generate_grasp_candidate_antipodal(self, plant_context,
                                            pcl, scene_graph_context):
@@ -282,4 +292,5 @@ class GraspSampler:
             best_X_Gs.append(X_Gs[idx])
             # draw_grasp_candidate(X_Gs[idx], prefix=f'{idx}th best')
 
+        render_system_with_graphviz(self.diagram)
         return best_X_Gs

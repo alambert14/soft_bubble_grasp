@@ -54,6 +54,8 @@ def create_iiwa_soft_bubble_plant(gravity):
         link_frame_indices.append(
             plant.GetFrameByName("iiwa_link_" + str(i)).index())
 
+
+
     return plant, link_frame_indices
 
 

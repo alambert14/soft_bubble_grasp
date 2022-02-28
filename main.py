@@ -9,7 +9,7 @@ from pydrake.all import (
     RotationMatrix, SceneGraph, Simulator, TrajectorySource, MeshcatVisualizerParams, ConstantVectorSource,
     ConnectMeshcatVisualizer, InverseDynamicsController, Parser, ProcessModelDirectives, LoadModelDirectives,
     ZeroOrderHold, PidController, MeshcatContactVisualizer, ConnectContactResultsToDrakeVisualizer,
-    Joint,
+    Joint, PiecewisePolynomial, BasicVector,
 )
 from pydrake.math import RollPitchYaw
 from pydrake.multibody import inverse_kinematics
@@ -47,6 +47,40 @@ def render_system_with_graphviz(system, output_file="system_view.gz"):
     string = system.GetGraphvizString()
     src = Source(string)
     src.render(output_file, view=False)
+
+
+def concatenate_traj_list(traj_list):
+    """
+    Concatenates a list of PiecewisePolynomials into a single
+        PiecewisePolynomial.
+    """
+    traj = traj_list[0]
+    for a in traj_list[1:]:
+        dt = traj.end_time()
+        a.shiftRight(dt)
+        traj.ConcatenateInTime(a)
+        a.shiftRight(-dt)
+
+    return traj
+
+class SimpleTrajectorySource(LeafSystem):
+    def __init__(self, q_traj: PiecewisePolynomial):
+        super().__init__()
+        self.q_traj = q_traj
+
+        self.x_output_port = self.DeclareVectorOutputPort(
+            'x', BasicVector(q_traj.rows() * 2), self.calc_x)
+
+        self.t_start = 0.
+
+    def calc_x(self, context, output):
+        t = context.get_time() - self.t_start
+        q = self.q_traj.value(t).ravel()
+        v = self.q_traj.derivative(1).value(t).ravel()
+        output.SetFromVector(np.hstack([q, v]))
+
+    def set_t_start(self, t_start_new: float):
+        self.t_start = t_start_new
 
 
 class BubbleGripperSystem:
@@ -92,8 +126,19 @@ class BubbleGripperSystem:
         builder.Connect(idc.get_output_port_control(),
                         self.plant.get_actuation_input_port(model_iiwa))
 
-        q0 = ConstantVectorSource([0., 0., 0., -1.57, 0., 1.57, 0., 0, 0, 0, 0, 0, 0, 0])
-        builder.AddSystem(q0)
+        # q0 = ConstantVectorSource([0., 0., 0., -1.57, 0., 1.57, 0., 0, 0, 0, 0, 0, 0, 0])
+        # builder.AddSystem(q0)
+        # builder.Connect(q0.GetOutputPort('y0'), idc.get_input_port_desired_state())
+        q0 = [0., 0., 0., -1.57, 0., 1.57, 0]
+        q_knots = np.zeros((2, 7))
+        q_knots[0] = q0
+        robot_traj_source = SimpleTrajectorySource(
+            PiecewisePolynomial.ZeroOrderHold([0, 1], q_knots.T)
+        )
+        builder.AddSystem(robot_traj_source)
+        builder.Connect(robot_traj_source.x_output_port, idc.get_input_port_desired_state())
+        robot_traj_source.set_name('robot_traj_source')
+
         viz = ConnectMeshcatVisualizer(
             builder, scene_graph, zmq_url='tcp://127.0.0.1:6000', prefix="environment")
 
@@ -116,7 +161,6 @@ class BubbleGripperSystem:
         #     contact_input_port,
         # )
 
-        builder.Connect(q0.GetOutputPort('y0'), idc.get_input_port_desired_state())
 
         # Add the bubble gripper
         model_bubble = self.plant.GetModelInstanceByName('bubble')
@@ -194,11 +238,11 @@ class BubbleGripperSystem:
         # self.station.SetWsgPosition(station_context, 0.1)
         # self.station.SetWsgVelocity(station_context, 0)
 
-        simulator = Simulator(self.diagram, self.context)
-        simulator.set_target_realtime_rate(1.0)
+        self.simulator = Simulator(self.diagram, self.context)
+        self.simulator.set_target_realtime_rate(1.0)
 
         duration = 1
-        simulator.AdvanceTo(duration)
+        self.simulator.AdvanceTo(duration)
         self.viz.stop_recording()
         self.viz.publish_recording()
         print('creating grasp sampler')
@@ -214,10 +258,14 @@ class BubbleGripperSystem:
         frame_E = self.plant_iiwa_controller.GetBodyByName('bubble').body_frame()
         context_iiwa_plant = self.plant_iiwa_controller.CreateDefaultContext()
         print(f'frame E: {frame_E.CalcPoseInBodyFrame(context_iiwa_plant)}')
+
+        # THIS IS A PROBLEM
+        self.plant_iiwa_controller.SetPositions(context_iiwa_plant, [0, 0., 0., -1.57, 0., 1.57, 0.])
         X_WE_start = self.plant_iiwa_controller.CalcRelativeTransform(
             context_iiwa_plant, self.plant_iiwa_controller.world_frame(), frame_E)
+        print(X_WE_start)
         X_WE_above = RigidTransform(X_G)
-        X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.]))
+        X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.3]))
         try:
             q_traj_0_to_above, q_traj_above_to_0 = calc_joint_trajectory(
                 X_WE_start=X_WE_start, X_WE_final=X_WE_above, duration=5.0,
@@ -227,6 +275,17 @@ class BubbleGripperSystem:
         except AssertionError:
             print('Grasping failed, trying something else')
             raise RuntimeError
+
+        robot_traj_source = self.diagram.GetSubsystemByName('robot_traj_source')
+        # schunk_traj_source = self.diagram.GetSubsystemByName('schunk_traj_source')
+
+        t_current = self.context.get_time()
+        q_traj = concatenate_traj_list([q_traj_0_to_above, q_traj_above_to_0])
+        robot_traj_source.set_t_start(t_current)
+        robot_traj_source.q_traj = q_traj
+        self.simulator.AdvanceTo(t_current + q_traj.end_time())
+
+
 
 
         '''
