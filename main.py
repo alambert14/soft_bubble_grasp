@@ -139,6 +139,7 @@ class BubbleGripperSystem:
         builder.Connect(robot_traj_source.x_output_port, idc.get_input_port_desired_state())
         robot_traj_source.set_name('robot_traj_source')
 
+
         viz = ConnectMeshcatVisualizer(
             builder, scene_graph, zmq_url='tcp://127.0.0.1:6000', prefix="environment")
 
@@ -161,12 +162,11 @@ class BubbleGripperSystem:
         #     contact_input_port,
         # )
 
-
         # Add the bubble gripper
         model_bubble = self.plant.GetModelInstanceByName('bubble')
-        Kp_bubble = np.array([5, 5])
+        Kp_bubble = np.array([500, 500])
         Ki_bubble = np.zeros(2)
-        Kd_bubble = np.array([0.5, 0.5])
+        Kd_bubble = np.array([10, 10])
         pid = PidController(Kp_bubble, Ki_bubble, Kd_bubble)
         pid.set_name('gripper_finger_controller')
         builder.AddSystem(pid)
@@ -177,11 +177,16 @@ class BubbleGripperSystem:
             self.plant.get_state_output_port(model_bubble),
             pid.get_input_port_estimated_state())
 
-        bubble_desired_state = ConstantVectorSource([-0.05, 0.05, 0, 0])
-        builder.AddSystem(bubble_desired_state)
+        finger_setpoints = PiecewisePolynomial.ZeroOrderHold(
+            [0, 1], np.array([[-0.05, 0.05], [-0.05, 0.05]]).T
+        )
+        gripper_traj_source = SimpleTrajectorySource(finger_setpoints)
+        gripper_traj_source.set_name('gripper_traj_source')
+        builder.AddSystem(gripper_traj_source)
         builder.Connect(
-            bubble_desired_state.GetOutputPort('y0'),
-            pid.get_input_port_desired_state())
+            gripper_traj_source.x_output_port,
+            pid.get_input_port_desired_state()
+        )
 
         self.diagram = builder.Build()
         render_system_with_graphviz(self.diagram)
@@ -259,16 +264,25 @@ class BubbleGripperSystem:
         context_iiwa_plant = self.plant_iiwa_controller.CreateDefaultContext()
         print(f'frame E: {frame_E.CalcPoseInBodyFrame(context_iiwa_plant)}')
 
-        # THIS IS A PROBLEM
         self.plant_iiwa_controller.SetPositions(context_iiwa_plant, [0, 0., 0., -1.57, 0., 1.57, 0.])
         X_WE_start = self.plant_iiwa_controller.CalcRelativeTransform(
             context_iiwa_plant, self.plant_iiwa_controller.world_frame(), frame_E)
         print(X_WE_start)
         X_WE_above = RigidTransform(X_G)
         X_WE_above.set_translation(X_G.translation() + np.array([0, 0, 0.3]))
+        gripper_setpoints = np.array([[-0.05, 0.05],
+                                      [-0.05, 0.05],
+                                      [0.0, 0.0],
+                                      [0.0, 0.0]])
+
         try:
             q_traj_0_to_above, q_traj_above_to_0 = calc_joint_trajectory(
                 X_WE_start=X_WE_start, X_WE_final=X_WE_above, duration=5.0,
+                frame_E=frame_E, plant=self.plant_iiwa_controller,
+                q_initial_guess=np.array([-1.57, 0., 0., -1.57, 0., 1.57, 0.]),
+            )
+            q_traj_above_to_grasp, q_traj_grasp_to_above = calc_joint_trajectory(
+                X_WE_start=X_WE_above, X_WE_final=X_G, duration=3.0,
                 frame_E=frame_E, plant=self.plant_iiwa_controller,
                 q_initial_guess=np.array([-1.57, 0., 0., -1.57, 0., 1.57, 0.]),
             )
@@ -277,16 +291,18 @@ class BubbleGripperSystem:
             raise RuntimeError
 
         robot_traj_source = self.diagram.GetSubsystemByName('robot_traj_source')
-        # schunk_traj_source = self.diagram.GetSubsystemByName('schunk_traj_source')
+        gripper_traj_source = self.diagram.GetSubsystemByName('gripper_traj_source')
+        t_knots = np.array([0, 5, 8, 11])
+        gripper_traj = PiecewisePolynomial.ZeroOrderHold(t_knots, gripper_setpoints.T)
+        gripper_traj_source.q_traj = gripper_traj
+        print(gripper_traj_source.q_traj.value(0))
+        print(gripper_traj_source.q_traj.value(8))
 
         t_current = self.context.get_time()
-        q_traj = concatenate_traj_list([q_traj_0_to_above, q_traj_above_to_0])
+        q_traj = concatenate_traj_list([q_traj_0_to_above, q_traj_above_to_grasp, q_traj_grasp_to_above, q_traj_above_to_0])
         robot_traj_source.set_t_start(t_current)
         robot_traj_source.q_traj = q_traj
         self.simulator.AdvanceTo(t_current + q_traj.end_time())
-
-
-
 
         '''
         print(X_WE_above)
